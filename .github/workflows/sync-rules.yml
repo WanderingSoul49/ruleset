@@ -1,0 +1,41 @@
+name: Sync YAML rules
+
+on:
+  schedule:
+    # 15:45 UTC = 23:45 Asia/Shanghai
+    - cron: '45 15 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: sync-rules-main
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: main
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Generate YAML from list
+        run: npm run list2yaml
+      - name: Commit and push YAML changes
+        shell: bash
+        run: |
+          pathspec=':(glob)yaml/*.yaml'
+          if [[ -z "$(git status --porcelain --untracked-files=all -- "$pathspec")" ]]; then
+            echo 'YAML is already up to date.'
+            exit 0
+          fi
+          git add -A -- "$pathspec"
+          git -c user.name='github-actions[bot]' \
+              -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+              commit -m 'chore: sync YAML rules from list'
+          git push origin HEAD:refs/heads/main

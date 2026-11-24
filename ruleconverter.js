@@ -1,82 +1,91 @@
 #!/usr/bin/env node
-/**
- * 规则集格式转换工具
- *
- * 转换规则：
- * list ↔ yaml 格式互转
- * - 保留所有规则类型：DOMAIN, DOMAIN-SUFFIX, DOMAIN-KEYWORD, IP-CIDR 等
- * - 保留注释和空行，统一注释缩进
- * - list 格式：直接列出规则，每行一条
- * - yaml 格式：以 payload: 开头，规则前加 "- " 前缀
- */
 
-const fs = require('fs')
-const path = require('path')
+const fs = require('node:fs')
+const path = require('node:path')
 
-const [, , srcDir, destDir] = process.argv
+function renderYaml(source, content) {
+  let hasRules = false
+  const lines = content.split(/\r?\n/)
+  if (lines.at(-1) === '') lines.pop()
 
-if (!srcDir || !destDir) {
-  console.error('用法: node ruleconverter.js <源目录> <目标目录>')
-  process.exit(1)
+  const body = lines.map((line, index) => {
+    const rule = line.trim()
+    if (!rule) return ''
+    if (rule.startsWith('#')) {
+      if (/[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u2028\u2029\ufffe\uffff]/.test(rule)) {
+        throw new Error(`${source}:${index + 1}: 注释包含 YAML 不支持的字符`)
+      }
+      return `  ${rule}`
+    }
+
+    const [type, value] = rule.split(',', 2)
+    if (!value?.trim() || !type.trim()) {
+      throw new Error(`${source}:${index + 1}: 规则必须包含类型和匹配值`)
+    }
+
+    hasRules = true
+    // 引用整个字符串，避免 #、冒号等字符被解释为 YAML 语法。
+    const scalar = JSON.stringify(rule).replace(/[\u007f-\u009f\u2028\u2029\ufffe\uffff]/g, char =>
+      `\\u${char.charCodeAt(0).toString(16).padStart(4, '0')}`)
+    return `  - ${scalar}`
+  })
+
+  return [hasRules ? 'payload:' : 'payload: []', ...body, ''].join('\n')
 }
 
-const srcExt = path.extname(fs.readdirSync(srcDir).find(f => f.includes('.')) || '')
-const isListToYaml = srcExt === '.list'
+function syncRules(srcDir, destDir) {
+  const outputs = new Map()
+  const names = new Set()
+  const decoder = new TextDecoder('utf-8', { fatal: true })
 
-fs.mkdirSync(destDir, { recursive: true })
+  // 先校验完整输入；任何规则无效时，不修改现有的 YAML。
+  for (const entry of fs.readdirSync(srcDir, { withFileTypes: true })) {
+    if (path.extname(entry.name) !== '.list' || entry.isDirectory()) continue
+    const source = path.join(srcDir, entry.name)
+    if (!entry.isFile()) throw new Error(`${source}: 不是普通文件`)
 
-fs.readdirSync(srcDir).forEach(file => {
-  const srcPath = path.join(srcDir, file)
-  if (!fs.statSync(srcPath).isFile()) return
+    const name = `${path.basename(entry.name, '.list')}.yaml`
+    const key = name.normalize('NFC').toLowerCase()
+    if (names.has(key)) throw new Error(`${source}: 输出文件名冲突（忽略大小写）`)
+    names.add(key)
 
-  const baseName = path.basename(file, path.extname(file))
-  const destExt = isListToYaml ? '.yaml' : '.list'
-  const destPath = path.join(destDir, baseName + destExt)
-
-  const content = fs.readFileSync(srcPath, 'utf8')
-  const lines = content.split('\n')
-
-  let result
-  if (isListToYaml) {
-    // list → yaml 转换
-    const rules = lines.map(line => {
-      const trimmed = line.trim()
-
-      // 空行保持原样
-      if (!trimmed) return line
-
-      // 注释行统一缩进到与规则相同的位置
-      if (trimmed.startsWith('#')) {
-        return `  # ${trimmed.substring(1).trim()}`
-      }
-
-      // 规则行添加 yaml 前缀
-      return `  - ${trimmed}`
-    })
-    result = 'payload:\n' + rules.join('\n')
-  } else {
-    // yaml → list 转换
-    result = lines
-      .filter(line => line.trim() !== 'payload:')
-      .map(line => {
-        const trimmed = line.trim()
-
-        // 空行保持原样
-        if (!trimmed) return ''
-
-        // 注释行去除缩进，保持统一格式
-        if (trimmed.startsWith('#')) {
-          return `# ${trimmed.substring(1).trim()}`
-        }
-
-        // 规则行去除 yaml 前缀
-        return line.replace(/^\s*-\s*/, '')
-      })
-      .join('\n')
+    const bytes = fs.readFileSync(source)
+    let content
+    try {
+      content = decoder.decode(bytes)
+    } catch (error) {
+      throw new Error(`${source}: 无效的 UTF-8`, { cause: error })
+    }
+    outputs.set(name, renderYaml(source, content))
   }
 
-  fs.writeFileSync(destPath, result)
-  console.log(`✅ ${file} → ${baseName}${destExt}`)
-})
+  fs.mkdirSync(destDir, { recursive: true })
+  const existing = new Set()
+  for (const entry of fs.readdirSync(destDir, { withFileTypes: true })) {
+    if (path.extname(entry.name) !== '.yaml') continue
+    const target = path.join(destDir, entry.name)
+    if (entry.isFile() && outputs.has(entry.name)) {
+      existing.add(entry.name)
+    } else if (entry.isFile() || entry.isSymbolicLink()) {
+      // 删除旧拼写后再创建新文件，兼容大小写不敏感的文件系统。
+      fs.unlinkSync(target)
+      console.log(`删除 ${target}`)
+    }
+  }
 
-console.log(`\n🎉 转换完成！`)
+  for (const [name, content] of outputs) {
+    const target = path.join(destDir, name)
+    if (existing.has(name) && fs.readFileSync(target, 'utf8') === content) continue
+    fs.writeFileSync(target, content)
+    console.log(`生成 ${target}`)
+  }
+}
+
+try {
+  const [, , srcDir, destDir] = process.argv
+  if (!srcDir || !destDir) throw new Error('用法: node ruleconverter.js <list 目录> <yaml 目录>')
+  syncRules(srcDir, destDir)
+} catch (error) {
+  console.error(error.message)
+  process.exitCode = 1
+}

@@ -2,10 +2,8 @@
   "name": "ruleset",
   "version": "1.0.0",
   "description": "",
-  "main": "index.js",
   "scripts": {
-    "list2yaml": "node ruleconverter.js list yaml",
-    "yaml2list": "node ruleconverter.js yaml list"
+    "list2yaml": "node ruleconverter.js list yaml"
   },
   "keywords": [],
   "author": "",
